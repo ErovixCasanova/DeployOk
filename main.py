@@ -169,6 +169,11 @@ def check_card():
         
         # Step 1: Get CSRF token
         response = session.get('https://mousewatcher.com', headers=chrome_headers)
+        
+
+with open('response.html', 'w', encoding='utf-8') as f:
+    f.write(response.text)
+        
         log_response("GET_CSRF_TOKEN", response, card_last4)
         
         csrf_match = re.search(r'<meta name="csrf-token" content="([^"]+)"', response.text)
